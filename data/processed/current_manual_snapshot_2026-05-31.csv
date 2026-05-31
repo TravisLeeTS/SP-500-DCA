@@ -1,0 +1,2 @@
+run_date,effective_market_date,regime,dca_amount_aed,confidence,cape,spx_close,spx_10m_ma_estimate,return_12m_estimate,drawdown_estimate,baa_aaa_spread_estimate,hy_oas,sahm_status,yield_curve_status,real_yield_10y_estimate,explanation
+2026-05-31,2026-05-29,Orange-A,2750,Medium,42.66,7580.06,"6800-6900",0.30,0.00,0.61,2.76,"not confirmed","positive",2.18,"Extreme valuation slows DCA, but trend is healthy and credit/labor stress is not confirmed."
