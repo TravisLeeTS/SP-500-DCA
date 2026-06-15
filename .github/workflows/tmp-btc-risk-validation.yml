@@ -1,0 +1,166 @@
+name: Temporary BTC Risk Validation
+
+on:
+  push:
+    paths:
+      - ".github/workflows/tmp-btc-risk-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy matplotlib
+
+      - name: Download BTC CSV and run validation
+        run: |
+          curl -L --fail -o btc.csv https://raw.githubusercontent.com/Habrador/Bitcoin-price-visualization/master/Bitcoin-price-USD.csv
+          python - <<'PY'
+          import bisect, numpy as np, pandas as pd
+          import matplotlib.pyplot as plt
+
+          df = pd.read_csv("btc.csv")
+          df["Date"] = pd.to_datetime(df["Date"])
+          price = pd.Series(pd.to_numeric(df["Price"], errors="coerce").values, index=df["Date"], name="close").dropna()
+          price = price[~price.index.duplicated(keep="last")].sort_index().asfreq("D").ffill()
+
+          def rsi(s, w=20):
+              d=s.diff(); g=d.clip(lower=0); l=-d.clip(upper=0)
+              ag=g.ewm(alpha=1/w, adjust=False, min_periods=w).mean()
+              al=l.ewm(alpha=1/w, adjust=False, min_periods=w).mean()
+              rs=ag/al.replace(0,np.nan)
+              out=100-(100/(1+rs))
+              return out.where(al!=0,100)
+
+          def pct_rank(s, minp=730):
+              vals=[]; out=np.full(len(s), np.nan)
+              for i,v in enumerate(s.to_numpy(float)):
+                  if np.isfinite(v): bisect.insort(vals, float(v))
+                  if len(vals)>=minp and np.isfinite(v):
+                      out[i]=bisect.bisect_right(vals,float(v))/len(vals)
+              return pd.Series(out,index=s.index,name=s.name)
+
+          def power_resid(p, minp=730):
+              genesis=pd.Timestamp("2009-01-03")
+              x=np.log((p.index-genesis).days.astype(float))
+              y=np.log(p.to_numpy(float))
+              m=np.isfinite(x)&np.isfinite(y)
+              n=pd.Series(m.astype(int),index=p.index).cumsum().shift(1)
+              sx=pd.Series(np.where(m,x,0.0),index=p.index).cumsum().shift(1)
+              sy=pd.Series(np.where(m,y,0.0),index=p.index).cumsum().shift(1)
+              sxx=pd.Series(np.where(m,x*x,0.0),index=p.index).cumsum().shift(1)
+              sxy=pd.Series(np.where(m,x*y,0.0),index=p.index).cumsum().shift(1)
+              den=n*sxx-sx*sx
+              b=(n*sxy-sx*sy)/den.replace(0,np.nan)
+              a=(sy-b*sx)/n.replace(0,np.nan)
+              r=pd.Series(y,index=p.index)-(b*pd.Series(x,index=p.index)+a)
+              return r.where(n>=minp)
+
+          issuance=pd.Series(7200.0,index=price.index)
+          issuance.loc[price.index>=pd.Timestamp("2012-11-28")]=3600
+          issuance.loc[price.index>=pd.Timestamp("2016-07-09")]=1800
+          issuance.loc[price.index>=pd.Timestamp("2020-05-11")]=900
+          issuance.loc[price.index>=pd.Timestamp("2024-04-20")]=450
+          usd_iss=issuance*price
+          puell=usd_iss/usd_iss.rolling(365,min_periods=365).mean()
+          ret=price.pct_change()
+
+          raw=pd.DataFrame({
+              "ema_short_medium":np.log(price.ewm(span=5,adjust=False).mean()/price.ewm(span=50,adjust=False).mean()),
+              "mayer_200d":np.log(price/price.rolling(200,min_periods=200).mean()),
+              "ema200_extension":np.log(price/price.ewm(span=200,adjust=False).mean()),
+              "ema400_extension":np.log(price/price.ewm(span=400,adjust=False).mean()),
+              "rsi20":rsi(price,20),
+              "sharpe365":(ret.rolling(365,min_periods=365).mean()/ret.rolling(365,min_periods=365).std())*np.sqrt(365),
+              "powerlaw_resid":power_resid(price),
+              "puell":np.log(puell)
+          }).replace([np.inf,-np.inf],np.nan)
+
+          ranks=pd.DataFrame({c:pct_rank(raw[c]) for c in raw.columns},index=raw.index)
+          w=pd.Series({"ema_short_medium":0.10,"mayer_200d":0.15,"ema200_extension":0.12,"ema400_extension":0.13,"rsi20":0.08,"sharpe365":0.08,"powerlaw_resid":0.24,"puell":0.10})
+          aw=ranks.notna().mul(w,axis=1).sum(axis=1)
+          risk=(ranks.mul(w,axis=1).sum(axis=1)/aw.replace(0,np.nan)).where(ranks.notna().sum(axis=1)>=5)
+          risk=risk.ewm(span=5,adjust=False).mean().clip(0,1).rename("risk")
+          ts=pd.concat([price,risk],axis=1).dropna()
+
+          val=ts.copy()
+          for d in [365,730,1460]:
+              val[f"fwd_{d}d"]=val["close"].shift(-d)/val["close"]-1
+          val=val.dropna()
+          val["risk_quintile"]=pd.qcut(val["risk"],5,labels=False,duplicates="drop")+1
+          quint=val.groupby("risk_quintile").agg(
+              n=("risk","size"),
+              median_risk=("risk","median"),
+              median_fwd_1y=("fwd_365d","median"),
+              median_fwd_2y=("fwd_730d","median"),
+              median_fwd_4y=("fwd_1460d","median"),
+              mean_fwd_1y=("fwd_365d","mean"),
+              mean_fwd_2y=("fwd_730d","mean"),
+              mean_fwd_4y=("fwd_1460d","mean")
+          ).reset_index()
+          spear=val[["risk","fwd_365d","fwd_730d","fwd_1460d"]].corr(method="spearman").loc["risk"]
+
+          monthly=ts.resample("MS").first()
+          rows=[]
+          for strat in ["static","risk_adjusted"]:
+              cash=btc=0.0
+              for dt,row in monthly.iterrows():
+                  cash+=1000.0; r=row["risk"]; px=row["close"]
+                  mult=1.0
+                  if strat=="risk_adjusted":
+                      mult=1.5 if r<0.2 else 1.25 if r<0.4 else 1.0 if r<0.6 else 0.5 if r<0.75 else 0.25
+                  buy=min(cash,1000*mult); btc+=buy/px; cash-=buy
+                  rows.append({"date":dt,"strategy":strat,"risk":r,"close":px,"buy_amount":buy,"cash":cash,"btc":btc,"equity":cash+btc*px})
+          dca=pd.DataFrame(rows)
+          dsum=[]
+          for strat,g in dca.groupby("strategy"):
+              g=g.sort_values("date"); eq=g["equity"]; years=(g["date"].iloc[-1]-g["date"].iloc[0]).days/365.25
+              dsum.append({"strategy":strat,"months":len(g),"total_bought":g["buy_amount"].sum(),"ending_cash":g["cash"].iloc[-1],"ending_btc":g["btc"].iloc[-1],"terminal_wealth":eq.iloc[-1],"profit_vs_contribution":eq.iloc[-1]/(1000*len(g))-1,"CAGR_from_first_equity":(eq.iloc[-1]/eq.iloc[0])**(1/years)-1,"max_drawdown":(eq/eq.cummax()-1).min()})
+          dsum=pd.DataFrame(dsum)
+
+          events={"2013_top":"2013-12-04","2015_bottom":"2015-01-14","2017_top":"2017-12-17","2018_bottom":"2018-12-15","2020_covid_crash":"2020-03-13","2021_top":"2021-11-10","2022_bottom":"2022-11-21","2024_halving":"2024-04-20"}
+          ev=[]
+          for name,date in events.items():
+              dt=pd.Timestamp(date)
+              if ts.index.min()<=dt<=ts.index.max():
+                  ix=ts.index[ts.index.get_indexer([dt],method="nearest")[0]]
+                  ev.append({"event":name,"date":str(ix.date()),"close":ts.loc[ix,"close"],"risk":ts.loc[ix,"risk"]})
+          ev=pd.DataFrame(ev)
+
+          ts.to_csv("btc_risk_proxy_timeseries.csv")
+          quint.to_csv("btc_risk_proxy_quintile_validation.csv",index=False)
+          dsum.to_csv("btc_risk_proxy_dca_validation.csv",index=False)
+          ev.to_csv("btc_risk_proxy_event_validation.csv",index=False)
+
+          ax=ts["close"].plot(logy=True,figsize=(12,6),title="BTC price and risk proxy")
+          ax2=ax.twinx(); ts["risk"].plot(ax=ax2); ax2.set_ylim(0,1)
+          plt.tight_layout(); plt.savefig("btc_risk_proxy_chart.png",dpi=160)
+
+          print("LATEST")
+          print(ts.tail(1).to_string())
+          print("\nQUINTILE_VALIDATION")
+          print(quint.to_string(index=False))
+          print("\nSPEARMAN")
+          print(spear.to_string())
+          print("\nDCA")
+          print(dsum.to_string(index=False))
+          print("\nEVENTS")
+          print(ev.to_string(index=False))
+          PY
+
+      - name: Upload validation outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: btc-risk-validation-output
+          path: |
+            btc_risk_proxy_timeseries.csv
+            btc_risk_proxy_quintile_validation.csv
+            btc_risk_proxy_dca_validation.csv
+            btc_risk_proxy_event_validation.csv
+            btc_risk_proxy_chart.png
