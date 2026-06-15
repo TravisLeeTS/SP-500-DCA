@@ -1,23 +1,10 @@
-name: Temporary BTC Summary Risk Validation
+name: Disabled
 
 on:
-  pull_request: {}
   workflow_dispatch: {}
 
-permissions:
-  contents: read
-
 jobs:
-  validate:
+  noop:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: pip install -q pandas numpy matplotlib
-      - name: Run revised validation
-        run: python tmp/btc-risk-validation/validate_summary.py
-      - name: Upload validation outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: btc-summary-risk-validation-output
-          path: btc_summary_*
+      - run: echo ok
