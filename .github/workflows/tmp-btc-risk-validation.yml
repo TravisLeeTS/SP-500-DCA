@@ -1,10 +1,10 @@
-name: Temporary BTC Risk Validation Disabled
+name: Disabled
 
 on:
   workflow_dispatch: {}
 
 jobs:
-  disabled:
+  noop:
     runs-on: ubuntu-latest
     steps:
-      - run: echo disabled
+      - run: echo ok
