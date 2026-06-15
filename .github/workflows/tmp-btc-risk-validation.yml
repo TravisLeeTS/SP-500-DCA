@@ -1,23 +1,10 @@
-name: Temporary BTC Risk Validation
+name: Temporary BTC Risk Validation Disabled
 
 on:
-  pull_request: {}
   workflow_dispatch: {}
 
-permissions:
-  contents: read
-
 jobs:
-  validate:
+  disabled:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: pip install -q pandas numpy matplotlib
-      - name: Run validation
-        run: python tmp/btc-risk-validation/validate.py
-      - name: Upload validation outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: btc-risk-validation-output
-          path: btc_risk_proxy_*
+      - run: echo disabled
